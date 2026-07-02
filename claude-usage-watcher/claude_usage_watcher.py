@@ -267,14 +267,22 @@ def cmd_hit_limit(_args) -> None:
     save_state(state)
 
 
+DELIVERY_CONFIRM_GRACE = timedelta(minutes=30)
+QSTASH_TERMINAL_FAILURE_STATES = {"FAILED", "CANCELLED"}
+
+
 def cmd_check(args) -> None:
     """Call from the scheduler every few minutes. In the common case the
     push was already fired directly by QStash at the exact reset moment,
-    independent of this machine being awake -- so this just mirrors
-    notified=True locally once reset_at has passed, for accurate `status`
-    output. It only sends directly (the old always-local behavior) as a
-    fallback, for a window that never got a qstash_message_id scheduled
-    (e.g. this machine was offline when record/correct/hit-limit ran)."""
+    independent of this machine being awake -- so this just confirms
+    delivery via QStash's logs API and mirrors notified=True locally, for
+    accurate `status` output. It sends directly (the old always-local
+    behavior) in two cases: a window that never got a qstash_message_id
+    scheduled at all (e.g. this machine was offline when record/correct/
+    hit-limit ran), or one where QStash confirms the send permanently
+    failed (bad chat id, revoked bot token, etc) or where delivery still
+    isn't confirmed DELIVERY_CONFIRM_GRACE after reset_at -- so a scheduled
+    alarm that silently never arrives doesn't mean silence forever."""
     state = load_state()
     now = now_utc()
     changed = False
@@ -295,14 +303,29 @@ def cmd_check(args) -> None:
                 # Preview only -- never mutate state, so a real check
                 # afterwards still fires for real.
                 if covered_by_qstash:
-                    print(f"[dry-run] would mark notified (QStash already delivered): {message}")
+                    delivery_state = qstash_delivery_state(entry["qstash_message_id"])
+                    print(f"[dry-run] QStash delivery state: {delivery_state or 'unknown'} -- {message}")
                 else:
                     print(f"[dry-run] would notify directly (no QStash alarm was scheduled): {message}")
                 continue
 
             if covered_by_qstash:
-                entry["notified"] = True
-                changed = True
+                delivery_state = qstash_delivery_state(entry["qstash_message_id"])
+                past_grace = (now - reset_at) > DELIVERY_CONFIRM_GRACE
+                if delivery_state == "DELIVERED":
+                    entry["notified"] = True
+                    changed = True
+                elif delivery_state in QSTASH_TERMINAL_FAILURE_STATES or past_grace:
+                    # QStash confirmed it'll never deliver, or we've waited
+                    # long enough without confirmation to stop trusting it
+                    # silently -- send directly so this never goes quiet.
+                    if send_telegram(f"*Claude usage reset*\n{message}"):
+                        entry["notified"] = True
+                        changed = True
+                    # else: leave notified=False, retry next tick.
+                # else: still in flight (CREATED/ACTIVE/RETRY/ERROR/
+                # IN_PROGRESS/unknown) and within grace -- check again
+                # next tick rather than assuming success or failure.
             elif send_telegram(f"*Claude usage reset*\n{message}"):
                 entry["notified"] = True
                 changed = True
@@ -391,6 +414,35 @@ def schedule_alarm(kind: str, reset_at: datetime):
     except (urllib.error.URLError, json.JSONDecodeError) as e:
         print(f"warning: failed to schedule QStash alarm ({e})", file=sys.stderr)
         return None
+
+
+def qstash_delivery_state(message_id: str):
+    """Query QStash's logs API for the latest delivery state of a
+    scheduled message: DELIVERED, FAILED, RETRY, ERROR, ACTIVE, etc (see
+    Upstash's /v2/logs docs for the full enum). Returns None if the query
+    itself failed, secrets are missing, or no log entry exists yet --
+    callers must treat None as "unknown, try again later," never as a
+    stand-in for any particular delivery outcome. This is what lets
+    cmd_check tell "QStash actually delivered it" apart from "QStash
+    accepted the schedule call," which scheduling success alone can't."""
+    token = os.environ.get(QSTASH_TOKEN_ENV)
+    base_url = os.environ.get(QSTASH_URL_ENV)
+    if not token or not base_url:
+        return None
+    url = f"{base_url.rstrip('/')}/v2/logs?messageId={urllib.parse.quote(message_id)}&count=10"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read())
+    except (urllib.error.URLError, json.JSONDecodeError):
+        return None
+    # Despite what Upstash's docs page for this endpoint says, the live
+    # API returns the array under "events", not "logs" -- verified against
+    # a real account's response during development.
+    events = result.get("events") or []
+    if not events:
+        return None
+    return max(events, key=lambda entry: entry.get("time", 0)).get("state")
 
 
 def cancel_alarm(message_id: str) -> None:
