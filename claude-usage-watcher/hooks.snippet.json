@@ -1,0 +1,25 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/aaryan/bin/claude_usage_watcher.py record"
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "matcher": "rate_limit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/aaryan/bin/claude_usage_watcher.py hit-limit"
+          }
+        ]
+      }
+    ]
+  }
+}

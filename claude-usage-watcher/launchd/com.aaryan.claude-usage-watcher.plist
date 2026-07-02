@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.aaryan.claude-usage-watcher</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>/Users/aaryan/bin/claude_usage_watcher.py</string>
+    <string>check</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CLAUDE_NOTIFIER_NTFY_TOPIC</key>
+    <string>REPLACE_ME</string>
+  </dict>
+
+  <key>StartInterval</key>
+  <integer>300</integer>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/aaryan/.claude-usage-watcher/launchd.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/aaryan/.claude-usage-watcher/launchd.err.log</string>
+</dict>
+</plist>
