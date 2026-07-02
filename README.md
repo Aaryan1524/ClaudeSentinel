@@ -18,6 +18,19 @@ claude.ai web/mobile app, since those don't fire local hooks; use `correct`
 to hand it a real observed timestamp whenever you have one, and that
 correction wins until it itself expires.
 
+> **⚠️ Disclaimer: the in-app/CLI countdown is always the source of truth,
+> not this tool.** This was hit directly during setup — the tool's
+> `inferred` reset time was off from what Claude Code's own interface
+> showed by over an hour, because the tool only starts counting from
+> whenever a hook *first happens to fire*, which isn't necessarily the true
+> start of your current window (e.g. if hooks were registered mid-window,
+> or usage happened outside Claude Code). **If Claude Code or claude.ai
+> ever shows a different countdown than this tool, trust the app and run
+> `correct five_hour <timestamp>` to reconcile** — don't assume the app is
+> the one that's wrong.
+
+
+
 **The weekly cap** is tracked separately for Opus vs. all other models, and
 its exact reset mechanics aren't publicly documented (rolling-from-first-use
 like the 5-hour window? fixed weekly boundary? unknown). So this tool never
@@ -82,6 +95,8 @@ polls every 5 min purely as a fallback/status-sync, not the delivery path.
 ```
 Claude-Efficiency/
 ├── README.md                            this file
+├── SYSTEMDESIGN.md                       in-depth technical explanation of how this was built
+├── FUTUREWORK.md                         possible future improvements/integrations
 ├── .env                                  QStash credentials from Upstash's dashboard (gitignored)
 ├── .gitignore
 └── claude-usage-watcher/
@@ -299,6 +314,18 @@ prove it — that's how this was verified originally).
   development. Every invocation in this repo (hooks, plist, test.sh) is
   pinned to `/usr/bin/python3` specifically to avoid depending on whatever
   `python3` happens to resolve first on `$PATH`.
+- **`python3 -c "..."` one-liners can fail under a TCC-protected working
+  directory, even when running the actual script from the same place works
+  fine.** Python inserts different things into `sys.path[0]` depending on
+  invocation style: running a script file inserts *that script's*
+  directory, but `python3 -c "..."` inserts the current working directory.
+  If your shell's `cwd` happens to be under `~/Desktop`/`~/Documents`/
+  `~/Downloads` when you run an inline one-liner (like the timestamp
+  helpers in this README's setup steps), Python's own startup import scan
+  can hit the same TCC wall described above — even though hooks and
+  `launchd` are unaffected (they always invoke the real `.py` file, never
+  `-c`). If a copy-pasted one-liner throws a `PermissionError` during
+  import, `cd` somewhere outside those three folders (e.g. `/tmp`) first.
 
 ## Troubleshooting
 
