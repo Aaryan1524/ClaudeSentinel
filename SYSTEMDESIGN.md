@@ -237,8 +237,8 @@ and chat ID, sourced from the same secrets file.
 
 ### The deployed copy: `~/bin/claude_usage_watcher.py`
 
-The repo (`claude-usage-watcher/claude_usage_watcher.py`) is where you
-edit the script. It is **not** what actually runs — hooks and `launchd`
+The repo's `claude_usage_watcher.py` (repo root) is where you edit the
+script. It is **not** what actually runs — hooks and `launchd`
 both point at `~/bin/claude_usage_watcher.py`, a plain copy kept in sync
 by `./install.sh`. See the TCC section below for why this split exists;
 it's not stylistic, it's a hard macOS requirement.

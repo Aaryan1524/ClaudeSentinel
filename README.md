@@ -21,7 +21,7 @@ the instant it knows — so the notification arrives on time whether your
 laptop is open, asleep, or off.
 
 ```bash
-cd claude-usage-watcher && ./install.sh
+./install.sh
 ```
 
 > [!TIP]
@@ -69,33 +69,27 @@ Claude-Efficiency/
 ├── SYSTEMDESIGN.md                       in-depth technical explanation of how this was built
 ├── FUTUREWORK.md                         possible future improvements/integrations
 ├── .gitignore
-└── claude-usage-watcher/
-    ├── claude_usage_watcher.py          the tool itself (record / hit-limit / check / correct / status)
-    ├── install.sh                       deploys the script to ~/bin (see "Why two copies" below)
-    ├── test.sh                          local, side-effect-free test pass (no real network calls)
-    ├── hooks.snippet.json               the two hook entries to merge into ~/.claude/settings.json
-    ├── claude_usage_watcher_HANDOFF.md  original planning brief this tool was built from, kept for reference
-    └── launchd/
-        └── com.aaryan.claude-usage-watcher.plist   LaunchAgent that runs `check` every 5 min (fallback only)
+├── claude_usage_watcher.py              the tool itself (record / hit-limit / check / correct / status)
+├── install.sh                           deploys the script to ~/bin (see "Why two copies" below)
+├── test.sh                              local, side-effect-free test pass (no real network calls)
+├── hooks.snippet.json                   the two hook entries to merge into ~/.claude/settings.json
+├── claude_usage_watcher_HANDOFF.md      original planning brief this tool was built from, kept for reference
+└── launchd/
+    └── com.aaryan.claude-usage-watcher.plist   LaunchAgent that runs `check` every 5 min (fallback only)
 ```
 
-All commands below are run from inside `claude-usage-watcher/`:
-
-```bash
-cd claude-usage-watcher
-```
+All commands below are run from the repo root.
 
 ### Why two copies of the script exist
 
-The `claude-usage-watcher/` directory is the source of truth and where you
-edit the script. But the hooks and the launchd job don't execute it from
-there — they execute a deployed copy at `~/bin/claude_usage_watcher.py`.
-Reason: `~/Desktop` (and `~/Documents`, `~/Downloads`) are TCC-protected on
-macOS. A background `launchd` process trying to read a script under
-`~/Desktop/...` fails with a silent `Operation not permitted`, even though
-your interactive Terminal reads the same path fine — this bit us once
-already setting this up. `~/bin` isn't a protected location, so it
-sidesteps the issue entirely.
+This repo is the source of truth and where you edit the script. But the
+hooks and the launchd job don't execute it from here — they execute a
+deployed copy at `~/bin/claude_usage_watcher.py`. Reason: `~/Desktop` (and
+`~/Documents`, `~/Downloads`) are TCC-protected on macOS. A background
+`launchd` process trying to read a script under `~/Desktop/...` fails with
+a silent `Operation not permitted`, even though your interactive Terminal
+reads the same path fine — this bit us once already setting this up.
+`~/bin` isn't a protected location, so it sidesteps the issue entirely.
 
 **After editing `claude_usage_watcher.py`, run `./install.sh`** to redeploy
 it to `~/bin` — the two copies are not auto-synced.
