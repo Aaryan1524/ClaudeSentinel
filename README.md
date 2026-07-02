@@ -51,14 +51,17 @@ message is cancelled and a new one scheduled; state tracks the active
 `qstash_message_id` per window.
 
 `check` (still run by `launchd` every 5 min) is now a **fallback and status
-sync**, not the primary delivery path: in the common case it just mirrors
-`notified=True` locally once a QStash-covered `reset_at` has passed, so
-`status` stays accurate. It only sends directly (the old always-poll
-behavior) for a window that never got a `qstash_message_id` — e.g. this
-machine was offline at the moment `record`/`correct`/`hit-limit` ran and
-QStash scheduling failed. Both paths never fire for the same window, by
-construction — see [Architecture history](#architecture-history) for why
-that mattered.
+sync**, not the primary delivery path: once a QStash-covered `reset_at` has
+passed, it queries QStash's own logs API to confirm the message was
+actually `DELIVERED` before marking `notified=True` — scheduling
+succeeding isn't treated as proof of delivery. If QStash reports a
+permanent failure (revoked bot token, bad chat id) or 30 minutes pass with
+no confirmation, it sends directly instead, so a scheduled alarm that
+silently never arrives doesn't mean silence forever. It also sends
+directly (immediately, no waiting) for a window that never got a
+`qstash_message_id` at all — e.g. this machine was offline at the moment
+`record`/`correct`/`hit-limit` ran and QStash scheduling failed. See
+[Architecture history](#architecture-history) for why this mattered.
 
 **`hit-limit`** is wired to Claude Code's `StopFailure` hook (matcher
 `rate_limit`, added in CLI v2.1.78) — it fires the instant a turn ends
@@ -159,6 +162,7 @@ State (separate from secrets) also lives outside this repo, at
 | File | Contents |
 |---|---|
 | `state.json` | current `five_hour` / `weekly` tracked windows, including each one's active `qstash_message_id` |
+| `state.lock` | empty lock file (`flock`) serializing concurrent reads/writes of `state.json` — safe to ignore |
 | `secrets.env` | the four credentials above, `chmod 600` |
 | `stop_failure_events.jsonl` | every raw `StopFailure` payload ever seen, one JSON object per line |
 | `launchd.out.log` / `launchd.err.log` | stdout/stderr from the scheduled `check` runs |
@@ -289,17 +293,21 @@ prove it — that's how this was verified originally).
 |---|---|---|
 | `record` | `UserPromptSubmit` hook | Starts a new 5-hour window if none is active and schedules its QStash alarm. No-op otherwise — usage volume never moves the reset time. |
 | `hit-limit` | `StopFailure(rate_limit)` hook | Logs the raw payload, marks `confirmed_blocked_at`; if it recognizes a real reset field, cancels the old alarm and schedules a new one. |
-| `check [--dry-run]` | launchd, every 5 min | Fallback + status sync — mirrors `notified=True` for QStash-covered windows, sends directly only if no alarm was ever scheduled. `--dry-run` previews without mutating state. |
+| `check [--dry-run]` | launchd, every 5 min | Fallback + status sync — confirms actual delivery via QStash's logs API before marking `notified=True`; sends directly if delivery fails/times out or no alarm was ever scheduled. `--dry-run` previews without mutating state. |
 | `correct <five_hour\|weekly> <ISO8601>` | manual, whenever you see a real value | Overwrites the tracked reset time with ground truth; cancels any existing alarm and schedules a new one. |
 | `status` | manual | Human-readable dump of both tracked windows. |
 
 ## Known gaps
 
-- **`StopFailure` payload schema is unconfirmed.** `hit-limit` currently
-  guesses at `reset_at` / `resets_at` / `reset_time` / `retry_after_ms` /
-  `retry_after_seconds` / `retry_after`. The next time a real rate limit
-  hits during normal use, read `stop_failure_events.jsonl`, find the real
-  field names, and update the key lists in `cmd_hit_limit` in
+- **`StopFailure` payload schema is unconfirmed.** `hit-limit` searches the
+  whole payload recursively (any nesting depth, case/hyphen-insensitive)
+  for `reset_at` / `resets_at` / `reset_time` / `retry_after_ms` /
+  `retry_after_seconds` / `retry_after`-style keys, and accepts either ISO
+  8601 strings or Unix epoch numbers — but the real field *names* are still
+  a guess. The next time a real rate limit hits during normal use, read
+  `stop_failure_events.jsonl` (or the "no recognized field" note it prints
+  to stderr, which lists every key it saw), find the real field names, and
+  update `RESET_TIMESTAMP_KEYS`/`RETRY_AFTER_*_KEYS` in
   `claude_usage_watcher.py`.
 - **Weekly cap mechanics are unknown.** Only ever set via `correct weekly`;
   never inferred. Feed it real observed values over time to eventually

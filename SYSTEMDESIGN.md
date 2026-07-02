@@ -119,11 +119,12 @@ A small JSON file, structured like this:
 - `source` — how we know that: `inferred` (computed from a hook firing),
   `observed` (you told it via `correct`), or `stop_failure:<field>` (learned
   from a real rate-limit event).
-- `notified` — whether `check` has already mirrored this as delivered.
-  Note this does **not** mean "Telegram definitely received it" in the
-  QStash-covered case — it means "the reset time passed and we're not
-  double-sending." QStash's own delivery guarantee is what actually gets
-  the message to Telegram.
+- `notified` — whether this window's reset has been delivered. In the
+  QStash-covered case, `check` confirms this against QStash's own logs API
+  (`DELIVERED` state) before setting it — it's not just "the reset time
+  passed." If delivery is never confirmed within 30 minutes of `reset_at`,
+  or QStash reports a terminal failure, `check` sends directly instead and
+  only then marks this `true`.
 - `qstash_message_id` — the ID of the currently-scheduled cloud alarm for
   this window, if scheduling succeeded. This is the field that determines
   whether `check` treats a passed reset as already-handled or falls back
@@ -182,17 +183,23 @@ and deliberately so:
 For each tracked window, if its `reset_at` has passed and it hasn't been
 marked notified yet:
 - **If it has a `qstash_message_id`** (the common case — scheduling
-  succeeded when the window was recorded): just mark `notified = true`
-  locally. Don't send anything. QStash already delivered it, independent
-  of whether this machine was even on when that happened.
+  succeeded when the window was recorded): query QStash's logs API
+  (`qstash_delivery_state`) for that message's actual delivery state.
+  `DELIVERED` → mark `notified = true`, nothing else to do. A terminal
+  failure (`FAILED`/`CANCELLED` — e.g. revoked bot token, bad chat id) *or*
+  no confirmation within 30 minutes of `reset_at` → send the Telegram
+  message directly, right now, from this machine, so a scheduled alarm
+  that silently never arrives doesn't mean silence forever. Anything else
+  (still `ACTIVE`/`RETRY`/unknown, within the 30-minute window) → leave it
+  alone and check again next tick.
 - **If it has no `qstash_message_id`** (scheduling failed — e.g. this
-  machine was offline or misconfigured at the moment `record` ran): fall
-  back to the old behavior and send the Telegram message directly, right
-  now, from this machine.
+  machine was offline or misconfigured at the moment `record` ran): send
+  the Telegram message directly immediately, same as the failure case above.
 
-This branching is the entire reason there's no double-notification risk:
-the two delivery paths are mutually exclusive by construction, keyed on
-whether a cloud alarm actually got scheduled.
+In rare cases where QStash's delivery-log telemetry lags behind the actual
+send past the 30-minute grace window, this can produce one duplicate
+notification. That's an accepted tradeoff — never silent beats never
+duplicate.
 
 `launchd` chosen over `cron`: this is macOS, and macOS's own scheduler
 underneath `cron` is `launchd` anyway — going straight to a `LaunchAgent`
@@ -353,18 +360,32 @@ folders from the start.
   this, a correction after a window already had an alarm scheduled would
   leave two alarms live — one for the stale time, one for the corrected
   time — and you'd get notified twice.
-- **`check`'s fallback path is keyed on presence of `qstash_message_id`,
-  not on trying to detect "did QStash actually fire."** There's no way to
-  ask QStash "did you already deliver this" from this script without
-  building a webhook receiver, which would reintroduce the "something has
-  to always be running" problem this design specifically avoids. Keying
-  on "did we successfully schedule" is a good enough proxy: if scheduling
-  succeeded, trust it; if it didn't, we already know a fallback is needed.
+- **`check` confirms actual delivery via QStash's logs API, not just
+  scheduling success.** Upstash's `/v2/logs?messageId=...` (undocumented
+  response shape — it returns `events`, not `logs`, despite what Upstash's
+  own docs page says) reports each message's real state (`DELIVERED`,
+  `FAILED`, etc). `check` treats scheduling success alone as "trust it, but
+  verify" — it only marks `notified` after confirming `DELIVERED`, and
+  falls back to a direct send if QStash reports a terminal failure or 30
+  minutes pass with no confirmation. This closes what used to be a silent
+  failure mode: a revoked bot token or bad chat id would previously mark a
+  window "notified" with nothing ever actually delivered.
+- **All state.json reads/writes are serialized with an `flock`-based lock
+  (`state.lock`), and writes are atomic (temp file + rename).** Claude Code
+  hooks can fire from more than one session on the same machine at nearly
+  the same instant; without this, two concurrent `record`/`hit-limit`/
+  `check` calls could race on the same read-modify-write cycle and the
+  loser's update (e.g. a `qstash_message_id`) would be silently clobbered.
 
 ## Known gaps that are genuinely open
 
-- **`StopFailure` payload schema is unconfirmed** — `hit-limit` guesses at
-  field names until a real payload is captured and inspected.
+- **`StopFailure` payload schema is unconfirmed** — `hit-limit` searches the
+  entire payload recursively (any nesting depth, case/hyphen-insensitive
+  key matching) and accepts either ISO 8601 strings or Unix epoch numbers
+  for the timestamp fields, but the actual field *names* Anthropic uses are
+  still a guess until a real payload is captured and inspected. When
+  nothing matches, it prints every key it saw, to make that inspection
+  fast the next time a real rate limit hits.
 - **Weekly cap reset mechanics are unpublished** — never inferred, only
   ever set by explicit `correct weekly`.
 - **The 5-hour window's `inferred` source can drift from Anthropic's true
@@ -372,10 +393,15 @@ folders from the start.
   fires — if that's not the actual first message of the window (e.g. hooks
   were registered mid-window, or usage happened via claude.ai's web/mobile
   app, which doesn't fire local hooks), the computed `reset_at` will be
-  wrong until corrected. This was observed directly during setup: the
-  tool's `inferred` time was off from the real app's countdown by over an
-  hour. `correct five_hour <timestamp>` is the fix whenever you notice a
-  mismatch — always trust what Claude Code/claude.ai itself shows you over
+  wrong until corrected. A genuine window rollover (the previous one
+  legitimately expired) is trustworthy and gets `source: inferred`; a
+  window created because no prior one was tracked at all gets
+  `source: inferred_cold_start` instead, with an explicit warning in
+  `record`'s output and `status`. This is exactly what happened during
+  original setup: the tool's `inferred` time was
+  off from the real app's countdown by over an hour. `correct five_hour
+  <timestamp>` is the fix whenever you notice a mismatch — always trust
+  what Claude Code/claude.ai itself shows you over
   this tool's inference.
 
 See `FUTUREWORK.md` for possible improvements to any of these.

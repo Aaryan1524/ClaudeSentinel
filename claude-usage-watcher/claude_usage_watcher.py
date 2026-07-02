@@ -57,12 +57,13 @@ changes (a correction, or hit-limit narrowing an inferred time), the old
 QStash message is cancelled and a new one scheduled -- state tracks the
 active `qstash_message_id` per window.
 
-`check` (still run periodically by launchd) no longer sends the push
-itself in the common case -- it only mirrors `notified=True` locally once
-a QStash-covered reset_at has passed, for accurate `status` output. It
-only falls back to sending directly (the old ntfy/Telegram-polling
-behavior) if no QStash message was ever successfully scheduled for that
-window (e.g. this machine was offline at record time) -- see cmd_check.
+`check` (still run periodically by launchd) confirms actual delivery via
+QStash's logs API before marking `notified=True` -- scheduling succeeding
+is not treated as proof of delivery. It falls back to sending directly
+(the old ntfy/Telegram-polling behavior) if QStash reports a permanent
+failure, if delivery isn't confirmed within 30 minutes of reset_at, or if
+no QStash message was ever successfully scheduled for that window (e.g.
+this machine was offline at record time) -- see cmd_check.
 
 SETUP
 -----
@@ -80,6 +81,8 @@ USAGE
 """
 
 import argparse
+import contextlib
+import fcntl
 import json
 import os
 import sys
@@ -92,6 +95,8 @@ from pathlib import Path
 STATE_PATH = Path(
     os.environ.get("CLAUDE_NOTIFIER_STATE", "~/.claude-usage-watcher/state.json")
 ).expanduser()
+
+LOCK_PATH = STATE_PATH.with_suffix(".lock")
 
 SECRETS_PATH = Path(
     os.environ.get("CLAUDE_NOTIFIER_SECRETS", "~/.claude-usage-watcher/secrets.env")
@@ -107,6 +112,33 @@ RESET_LABELS = {
     "five_hour": "5-hour Claude usage window",
     "weekly": "Weekly Claude usage cap",
 }
+
+# StopFailure's exact JSON payload shape is undocumented (see cmd_hit_limit).
+# These are educated guesses, normalized to lower_snake_case before matching
+# so "resetAt", "reset-at", and "reset_at" are all recognized the same way.
+RESET_TIMESTAMP_KEYS = {"reset_at", "resets_at", "reset_time", "resetat", "resetsat", "resettime"}
+RETRY_AFTER_MS_KEYS = {"retry_after_ms", "retryafterms"}
+RETRY_AFTER_SECONDS_KEYS = {"retry_after_seconds", "retry_after", "retryafterseconds", "retryafter"}
+
+
+def _normalize_key(key: str) -> str:
+    return key.lower().replace("-", "_")
+
+
+def iter_keys_values(node):
+    """Depth-first walk of a parsed JSON structure, yielding every
+    (key, value) pair at any nesting depth. Since the real field name(s)
+    are unconfirmed, searching the whole payload -- not just its top
+    level -- costs nothing on a payload this small and means a nested
+    shape (e.g. {"error": {"reset_at": ...}}) isn't silently missed just
+    because the guess about nesting was wrong too."""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            yield k, v
+            yield from iter_keys_values(v)
+    elif isinstance(node, list):
+        for item in node:
+            yield from iter_keys_values(item)
 
 
 def load_secrets_into_env() -> None:
@@ -137,6 +169,22 @@ def parse_iso(value: str) -> datetime:
     return dt
 
 
+def parse_flexible_timestamp(value) -> datetime:
+    """Like parse_iso, but also accepts a Unix epoch number (or numeric
+    string) -- at least as likely a real shape for StopFailure's
+    unconfirmed payload as an ISO string. >10**12 is treated as
+    milliseconds, otherwise seconds."""
+    if isinstance(value, str):
+        try:
+            return parse_iso(value)
+        except ValueError:
+            value = float(value)
+    if isinstance(value, (int, float)):
+        seconds = value / 1000 if value > 10**12 else value
+        return datetime.fromtimestamp(seconds, tz=timezone.utc)
+    raise TypeError(f"unrecognized timestamp shape: {value!r}")
+
+
 def load_state() -> dict:
     if not STATE_PATH.exists():
         return {}
@@ -148,7 +196,34 @@ def load_state() -> dict:
 
 def save_state(state: dict) -> None:
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STATE_PATH.write_text(json.dumps(state, indent=2, default=str))
+    # Write to a temp file and rename over the real one -- rename is atomic
+    # on POSIX, so a crash or a concurrent reader never sees a half-written
+    # state.json, only the old version or the new one, never a torn mix.
+    tmp_path = STATE_PATH.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps(state, indent=2, default=str))
+    tmp_path.replace(STATE_PATH)
+
+
+@contextlib.contextmanager
+def state_lock():
+    """Serialize every command's read-modify-write of state.json across
+    concurrent invocations -- e.g. two Claude Code sessions on this
+    machine both submitting a prompt at nearly the same instant, each
+    firing `record`. Without this, both processes could read the same
+    pre-update state, both schedule their own QStash alarm, and the
+    second process's save_state() would silently clobber the first's
+    qstash_message_id -- leaving an orphaned real cloud alarm with no
+    local record of it (a duplicate notification later, not data loss,
+    but still worth closing). fcntl.flock blocks until the lock is free,
+    so callers never interleave; combined with save_state's atomic
+    rename, a fully torn or lost update becomes structurally impossible."""
+    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(LOCK_PATH, "w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
 def fmt_local(dt: datetime) -> str:
@@ -169,15 +244,35 @@ def cmd_record(_args) -> None:
     now = now_utc()
 
     if reset_at is None or now >= parse_iso(reset_at):
+        # A brand new window that replaces one that just legitimately
+        # expired is trustworthy: this hook fires on every prompt, so
+        # "now" genuinely is the first message after expiry, matching
+        # Anthropic's own rule for when a window starts. But if there was
+        # no tracked five_hour window at all before this call, "now" is
+        # just whenever this tool happened to first see a prompt -- which
+        # is only the true window start if hooks were registered exactly
+        # at a window boundary. This distinction is the exact bug hit
+        # during original setup (README/SYSTEMDESIGN): the first inferred
+        # reset_at was off from the real countdown by over an hour.
+        is_cold_start = "five_hour" not in state
         new_reset_at = now + FIVE_HOUR_WINDOW
         state["five_hour"] = {
             "window_start": now.isoformat(),
             "reset_at": new_reset_at.isoformat(),
             "notified": False,
-            "source": "inferred",
+            "source": "inferred_cold_start" if is_cold_start else "inferred",
             "qstash_message_id": schedule_alarm("five_hour", new_reset_at),
         }
         save_state(state)
+        if is_cold_start:
+            print(
+                "note: first-ever window recorded, anchored to right now -- "
+                "this is a guess, not a confirmed window start. Compare "
+                "against Claude Code's own countdown or the claude.ai usage "
+                "page, and run `correct five_hour <timestamp>` if they "
+                "differ (see `status`).",
+                file=sys.stderr,
+            )
     # else: window already open, nothing to do -- alarm already scheduled.
 
 
@@ -235,25 +330,38 @@ def cmd_hit_limit(_args) -> None:
 
     new_reset_at = None
     new_source = None
-    for key in ("reset_at", "resets_at", "reset_time"):
-        if key in payload:
+    for key, value in iter_keys_values(payload):
+        if _normalize_key(key) in RESET_TIMESTAMP_KEYS:
             try:
-                new_reset_at = parse_iso(payload[key])
+                new_reset_at = parse_flexible_timestamp(value)
                 new_source = f"stop_failure:{key}"
+                break
             except (ValueError, TypeError):
-                pass
-            break
+                continue
 
     if new_reset_at is None:
-        for key, is_ms in (("retry_after_ms", True), ("retry_after_seconds", False), ("retry_after", False)):
-            if key in payload:
-                try:
-                    seconds = float(payload[key]) / (1000 if is_ms else 1)
-                    new_reset_at = now + timedelta(seconds=seconds)
-                    new_source = f"stop_failure:{key}"
-                except (ValueError, TypeError):
-                    pass
+        for key, value in iter_keys_values(payload):
+            normalized = _normalize_key(key)
+            if normalized not in RETRY_AFTER_MS_KEYS and normalized not in RETRY_AFTER_SECONDS_KEYS:
+                continue
+            try:
+                seconds = float(value) / (1000 if normalized in RETRY_AFTER_MS_KEYS else 1)
+                new_reset_at = now + timedelta(seconds=seconds)
+                new_source = f"stop_failure:{key}"
                 break
+            except (ValueError, TypeError):
+                continue
+
+    if new_reset_at is None and payload:
+        seen_keys = sorted({k for k, _ in iter_keys_values(payload)})
+        print(
+            "note: StopFailure payload had no recognized reset/retry field "
+            f"anywhere in it (searched all nesting levels). Keys seen: {seen_keys}. "
+            "Inspect stop_failure_events.jsonl for the full raw payload and "
+            "update RESET_TIMESTAMP_KEYS/RETRY_AFTER_*_KEYS in "
+            "claude_usage_watcher.py once you spot the real field name.",
+            file=sys.stderr,
+        )
 
     if new_reset_at is not None:
         old_message_id = five.get("qstash_message_id")
@@ -345,13 +453,23 @@ def cmd_status(_args) -> None:
     for kind in ("five_hour", "weekly"):
         entry = state.get(kind)
         print(f"\n{kind}:")
-        if not entry or not entry.get("reset_at"):
+        if not entry:
             print("  no data yet")
+            continue
+        if not entry.get("reset_at"):
+            print("  no reset time tracked yet")
+            if entry.get("confirmed_blocked_at"):
+                print(f"  confirmed blocked at: {fmt_local(parse_iso(entry['confirmed_blocked_at']))} (via StopFailure)")
             continue
         reset_at = parse_iso(entry["reset_at"])
         remaining = reset_at - now
         status = "PASSED (waiting for check to notify)" if remaining.total_seconds() <= 0 else "active"
         print(f"  source:    {entry.get('source', 'unknown')}")
+        if entry.get("source") == "inferred_cold_start":
+            print("  ⚠  unverified first-run guess -- anchored to whenever this tool first")
+            print("     saw a prompt, not a confirmed window start. Compare against Claude")
+            print("     Code's own countdown or claude.ai/settings/usage, then run:")
+            print(f"       correct {kind} <real timestamp>")
         print(f"  resets at: {fmt_local(reset_at)}  ({status})")
         if remaining.total_seconds() > 0:
             mins = int(remaining.total_seconds() // 60)
@@ -530,7 +648,8 @@ def main() -> None:
         "correct": cmd_correct,
         "status": cmd_status,
     }
-    dispatch[args.command](args)
+    with state_lock():
+        dispatch[args.command](args)
 
 
 if __name__ == "__main__":
