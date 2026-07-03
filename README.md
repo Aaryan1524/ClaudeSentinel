@@ -15,6 +15,12 @@
 
 <br>
 
+<div align="center">
+  <img src="assets/telegram_notification.jpg" alt="Claude Sentinel Telegram Notification" width="600">
+</div>
+
+<br>
+
 Sentinel watches Claude Code activity on this machine, computes exactly
 when your 5-hour usage window resets, and hands delivery off to the cloud
 the instant it knows — so the notification arrives on time whether your
@@ -50,6 +56,10 @@ closes that gap:
 Claude Code hook  →  claude_usage_watcher.py  →  Upstash QStash  →  Telegram
    (this Mac)          (computes reset_at)        (cloud alarm)      (your phone)
 ```
+
+<div align="center">
+  <img src="assets/architecture_diagram.png" alt="Claude Sentinel Architecture" width="800">
+</div>
 
 ---
 
@@ -190,6 +200,8 @@ etc.) that must survive untouched.
 Note the absolute `/usr/bin/python3` rather than a bare `python3` — see
 [Known gaps](#known-gaps) for why that matters.
 
+![Claude Settings Hook Configuration](assets/settings_json.png)
+
 ### 4. Create a Telegram bot and get your chat ID
 
 1. In Telegram, message **@BotFather** → `/newbot` → follow the prompts.
@@ -270,6 +282,10 @@ prove it — that's how this was verified originally).
 | `check [--dry-run]` | launchd, every 5 min | Fallback + status sync — confirms actual delivery via QStash's logs API before marking `notified=True`; sends directly if delivery fails/times out or no alarm was ever scheduled. `--dry-run` previews without mutating state. |
 | `correct <five_hour\|weekly> <ISO8601>` | manual, whenever you see a real value | Overwrites the tracked reset time with ground truth; cancels any existing alarm and schedules a new one. |
 | `status` | manual | Human-readable dump of both tracked windows. |
+
+Running `status` displays a clean, human-readable summary of your tracked windows, or you can check the raw `state.json` file:
+
+![Claude Sentinel Status Command](assets/status_command.png)
 
 ## Known gaps
 
