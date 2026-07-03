@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/python3 /Users/aaryan/bin/claude_usage_watcher.py record"
+            "command": "/usr/bin/python3 /Users/YOUR_USERNAME/bin/claude_usage_watcher.py record"
           }
         ]
       }
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/python3 /Users/aaryan/bin/claude_usage_watcher.py hit-limit"
+            "command": "/usr/bin/python3 /Users/YOUR_USERNAME/bin/claude_usage_watcher.py hit-limit"
           }
         ]
       }

@@ -75,7 +75,7 @@ Claude-Efficiency/
 ├── hooks.snippet.json                   the two hook entries to merge into ~/.claude/settings.json
 ├── claude_usage_watcher_HANDOFF.md      original planning brief this tool was built from, kept for reference
 └── launchd/
-    └── com.aaryan.claude-usage-watcher.plist   LaunchAgent that runs `check` every 5 min (fallback only)
+    └── com.claude-usage-watcher.plist   LaunchAgent that runs `check` every 5 min (fallback only)
 ```
 
 All commands below are run from the repo root.
@@ -130,6 +130,19 @@ State (separate from secrets) also lives outside this repo, at
 
 ## Setup
 
+### 0. Personalize the templates
+
+`hooks.snippet.json` and the launchd plist ship with a
+`/Users/YOUR_USERNAME` placeholder — launchd and Claude Code hooks both
+need absolute paths, so they can't use `~` or `$HOME` themselves. One
+command fills in *your* home directory everywhere it's needed:
+
+```bash
+sed -i '' "s|/Users/YOUR_USERNAME|$HOME|g" hooks.snippet.json launchd/com.claude-usage-watcher.plist
+```
+
+Run it once after cloning; every path below then matches your system.
+
 ### 1. Deploy the script to `~/bin`
 
 ```bash
@@ -163,12 +176,12 @@ etc.) that must survive untouched.
   "hooks": {
     "UserPromptSubmit": [
       { "hooks": [ { "type": "command",
-          "command": "/usr/bin/python3 /Users/aaryan/bin/claude_usage_watcher.py record" } ] }
+          "command": "/usr/bin/python3 /Users/YOUR_USERNAME/bin/claude_usage_watcher.py record" } ] }
     ],
     "StopFailure": [
       { "matcher": "rate_limit",
         "hooks": [ { "type": "command",
-          "command": "/usr/bin/python3 /Users/aaryan/bin/claude_usage_watcher.py hit-limit" } ] }
+          "command": "/usr/bin/python3 /Users/YOUR_USERNAME/bin/claude_usage_watcher.py hit-limit" } ] }
     ]
   }
 }
@@ -219,8 +232,8 @@ entirely outside the repo, under `~/.claude-usage-watcher/`, by design.
 ### 7. Load the launchd fallback job
 
 ```bash
-cp launchd/com.aaryan.claude-usage-watcher.plist ~/Library/LaunchAgents/
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.aaryan.claude-usage-watcher.plist
+cp launchd/com.claude-usage-watcher.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.claude-usage-watcher.plist
 launchctl list | grep claude-usage-watcher   # should show it loaded, exit status 0
 ```
 
@@ -232,8 +245,8 @@ above. (`launchctl load` still works but is the deprecated form;
 To reload after editing the plist:
 
 ```bash
-launchctl bootout gui/$(id -u)/com.aaryan.claude-usage-watcher 2>/dev/null
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.aaryan.claude-usage-watcher.plist
+launchctl bootout gui/$(id -u)/com.claude-usage-watcher 2>/dev/null
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.claude-usage-watcher.plist
 ```
 
 ### 8. Real end-to-end test
@@ -303,7 +316,7 @@ prove it — that's how this was verified originally).
 launchctl list | grep claude-usage-watcher
 
 # force a run right now, bypassing the 5-min interval
-launchctl start com.aaryan.claude-usage-watcher
+launchctl start com.claude-usage-watcher
 
 # check what actually happened on the last few ticks
 tail -f ~/.claude-usage-watcher/launchd.out.log ~/.claude-usage-watcher/launchd.err.log
@@ -340,8 +353,8 @@ specifically, and any Focus/Do Not Disturb modes.
 ## Uninstall
 
 ```bash
-launchctl bootout gui/$(id -u)/com.aaryan.claude-usage-watcher
-rm ~/Library/LaunchAgents/com.aaryan.claude-usage-watcher.plist
+launchctl bootout gui/$(id -u)/com.claude-usage-watcher
+rm ~/Library/LaunchAgents/com.claude-usage-watcher.plist
 rm ~/bin/claude_usage_watcher.py
 # then remove the two hook entries from ~/.claude/settings.json by hand
 rm -rf ~/.claude-usage-watcher   # also removes secrets.env

@@ -173,7 +173,7 @@ choice matters.
 
 ### `launchd` — the fallback, not the delivery mechanism
 
-A macOS `LaunchAgent` (`~/Library/LaunchAgents/com.aaryan.claude-usage-
+A macOS `LaunchAgent` (`~/Library/LaunchAgents/com.claude-usage-
 watcher.plist`) that runs `check` every 300 seconds. This used to be the
 *entire* delivery mechanism (see history below); today its job is narrower
 and deliberately so:

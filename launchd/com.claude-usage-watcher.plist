@@ -4,12 +4,12 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.aaryan.claude-usage-watcher</string>
+  <string>com.claude-usage-watcher</string>
 
   <key>ProgramArguments</key>
   <array>
     <string>/usr/bin/python3</string>
-    <string>/Users/aaryan/bin/claude_usage_watcher.py</string>
+    <string>/Users/YOUR_USERNAME/bin/claude_usage_watcher.py</string>
     <string>check</string>
   </array>
 
@@ -20,9 +20,9 @@
   <true/>
 
   <key>StandardOutPath</key>
-  <string>/Users/aaryan/.claude-usage-watcher/launchd.out.log</string>
+  <string>/Users/YOUR_USERNAME/.claude-usage-watcher/launchd.out.log</string>
 
   <key>StandardErrorPath</key>
-  <string>/Users/aaryan/.claude-usage-watcher/launchd.err.log</string>
+  <string>/Users/YOUR_USERNAME/.claude-usage-watcher/launchd.err.log</string>
 </dict>
 </plist>

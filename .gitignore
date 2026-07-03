@@ -11,3 +11,6 @@ claude-usage-watcher/__pycache__/
 # installed plist copies with real secrets baked in should never be authored here,
 # but guard against an accidental local copy anyway
 claude-usage-watcher/launchd/*.local.plist
+
+# Claude Code session config - local only
+.claude/
